@@ -1,6 +1,21 @@
 # MagicTap
 
-用于 Apple Magic Mouse 的 macOS 菜单栏触控工具。SwiftUI + AppKit 界面，C 桥接原始触控，所有处理在本机完成。
+用于 Apple Magic Mouse、Mac 内置触控板和 Apple 妙控板的 macOS 菜单栏触控工具。SwiftUI + AppKit 界面，C 桥接原始触控，所有处理在本机完成。
+
+## 0.3 触控板手势
+
+“输入设备”菜单可选择鼠标或触控板。一次只监听选定的一台设备，切换设备会暂停识别，需要再次点击“开始识别”。鼠标动作与触控板动作分别保存；鼠标已有动作、App 绑定保留。
+
+触控板支持以下六种手势，均可绑定音量、亮度、打开 App、点击等现有动作：
+
+- 三指轻触、四指轻触。
+- 四指左滑、右滑、上滑、下滑，按手指在触控板上的移动方向识别，与“自然滚动”设置无关。
+
+触控板默认所有动作都是“不执行动作”。先在预览模式确认手势，再配置动作并关闭预览。四指滑动需在 0.8 秒内移动至少约 12% 的触控范围，并有明确方向；一次落指只触发一次，抬起全部手指后才开始下一次。它不会连续调节亮度或音量。
+
+**系统手势冲突：** 本工具只读取触控，不拦截或修改系统手势。macOS 的四指桌面切换、调度中心等可能同时触发；如需将四指滑动用于自定义动作，请自行在“系统设置 → 触控板 → 更多手势”中关闭冲突项。三指拖移也可能与三指轻触冲突。工具不会自动改变这些设置。
+
+内置触控板已确认能收到真实触控帧；三指 / 四指手势仍需用户真机验收。外接妙控板通过产品名包含 `Trackpad` 识别，尚无外接设备验证。
 
 ## 功能
 
@@ -53,7 +68,7 @@ open dist/MagicTap.app
 ./package.sh
 ```
 
-该命令会先构建和自测，再生成 `dist/MagicTap-0.2.0-arm64.zip`（文件名中的架构随当前 Mac 改变）。`dist/` 和应用二进制不会提交到 Git。
+该命令会先构建和自测，再生成 `dist/MagicTap-0.3.0-arm64.zip`（文件名中的架构随当前 Mac 改变）。`dist/` 和应用二进制不会提交到 Git。
 
 默认使用 `codesign --sign -` 临时签名，没有 Developer ID 签名或 Apple 公证。如有自己的签名证书，可设置：
 
@@ -65,7 +80,7 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 
 ## 使用与权限
 
-1. 通过蓝牙连接 Magic Mouse，打开应用，点击“刷新设备”。目前通过名称包含 `Magic Mouse` 筛选设备，排除内置触控板。
+1. 通过蓝牙连接 Magic Mouse，打开应用，点击“刷新设备”。通过“输入设备”选择鼠标或触控板；名称包含 `Magic Mouse` 或 `Trackpad` 的设备会出现在列表。
 2. 点击“开始识别”。每次启动默认暂停、默认勾选“仅预览，不执行动作”。
 3. 先把所有手指抬离鼠标，再落下并抬起手指。默认有效时长 35–250 ms，移动容差为触控范围的 3.5%。
 4. 在窗口底部确认识别结果。要执行点击或快捷键，点击“打开权限设置”，在“隐私与安全性 → 辅助功能”中为**实际运行的那一份应用**授权。
@@ -93,8 +108,9 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 | 文件 | 职责 |
 | --- | --- |
 | `Sources/MagicTap.swift` | SwiftUI 设置界面、菜单栏、配置、权限检查和动作分发 |
-| `Sources/TapRecognizer.swift` | 轻触识别状态机与识别器自测 |
-| `Sources/TouchBridge.h` / `.c` | 加载 MultitouchSupport，筛选鼠标并转发触控帧 |
+| `Sources/TapRecognizer.swift` | 鼠标轻触识别状态机与自测 |
+| `Sources/TrackpadRecognizer.swift` | 触控板三指 / 四指轻触、四向滑动与自测 |
+| `Sources/TouchBridge.h` / `.c` | 加载 MultitouchSupport，筛选鼠标 / 触控板并转发选定设备的触控帧 |
 | `Sources/SystemActions.swift` | CoreAudio 音量、DisplayServices 亮度、App 启动 |
 | `Resources/Info.plist` | 应用标识、版本、最低系统版本和菜单栏配置 |
 | `build.sh` | 编译、生成 `.app`、签名和自测 |
@@ -107,12 +123,13 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 ./dist/MagicTap.app/Contents/MacOS/MagicTap --probe
 ./dist/MagicTap.app/Contents/MacOS/MagicTap --system-probe
 ./dist/MagicTap.app/Contents/MacOS/MagicTap --capture
+./dist/MagicTap.app/Contents/MacOS/MagicTap --capture --trackpad
 ```
 
 - `--self-test`：识别器、音量/亮度边界、缺失 App 校验和动作权限分类测试，不模拟真实鼠标操作。
 - `--probe`：列出触控设备及筛选结果。
 - `--system-probe`：只读检查音频设备及显示器亮度接口。
-- `--capture`：监听五秒触控并输出统计，不执行动作。请避免和正在监听的另一个副本同时使用。
+- `--capture`：监听五秒鼠标触控并输出统计；添加 `--trackpad` 则选择触控板，不执行动作。请避免和正在监听的另一个副本同时使用。
 
 另有 `--system-check`（将音量、亮度原值写回以检查可写性）和 `--open-app-check /System/Applications/Calculator.app`（实际打开指定应用）供开发诊断使用。
 
@@ -122,6 +139,6 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 
 原始触控使用私有 MultitouchSupport 接口及未公开的触点结构，亮度使用私有 DisplayServices 接口；系统升级可能需要适配。音量使用 CoreAudio；一些 HDMI / 数字音频设备没有可调系统音量。
 
-当前不支持双轻触、拖拽、双击计数、手指长时间搭放后的追加轻触、滑动动作、自动重连、开机启动或按应用配置。物理点击过滤也需要更多设备验证，仍属于实验版。
+当前不支持双轻触、拖拽、双击计数、手指长时间搭放后的追加轻触、鼠标滑动动作、自动重连、开机启动或按应用配置。物理点击过滤也需要更多设备验证，仍属于实验版。
 
 无网络请求、触控轨迹保存或外部上传；应用偏好保存在本机 UserDefaults。

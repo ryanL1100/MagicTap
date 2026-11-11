@@ -18,7 +18,7 @@ xcrun clang -O2 -Wall -Wextra -arch "$MAGICTAP_ARCH" -mmacosx-version-min="$MAGI
   -c Sources/TouchBridge.c -o "$MAGICTAP_BUILD_DIR/TouchBridge.o"
 xcrun swiftc -O -swift-version 5 -target "$MAGICTAP_ARCH-apple-macosx$MAGICTAP_MIN_OS" \
   -import-objc-header Sources/TouchBridge.h \
-  Sources/TapRecognizer.swift Sources/SystemActions.swift Sources/MagicTap.swift \
+  Sources/TapRecognizer.swift Sources/TrackpadRecognizer.swift Sources/SystemActions.swift Sources/MagicTap.swift \
   "$MAGICTAP_BUILD_DIR/TouchBridge.o" \
   -framework SwiftUI -framework AppKit -framework ApplicationServices \
   -framework IOKit -framework CoreFoundation -framework CoreAudio \

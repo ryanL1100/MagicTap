@@ -10,16 +10,16 @@ private var diagnosticFrames = 0
 private var diagnosticPeak = 0
 
 @_cdecl("magic_tap_frame")
-func magicTapFrame(_ timestamp: Double, _ count: Int32, _ coordinates: UnsafePointer<Float>?) {
+func magicTapFrame(_ timestamp: Double, _ count: Int32, _ coordinates: UnsafePointer<Float>?, _ deviceIndex: Int32) {
     let n = Int(count)
-    guard n >= 0, n <= 32 else { return }
+    guard n >= 0, n <= 32, n == 0 || coordinates != nil else { return }
     let points: [(Double,Double)] = (0..<n).map { (Double(coordinates![$0*2]),Double(coordinates![$0*2+1])) }
     let pressed = CGEventSource.buttonState(.combinedSessionState,button: .left) || CGEventSource.buttonState(.combinedSessionState,button: .right) || CGEventSource.buttonState(.combinedSessionState,button: .center)
     DispatchQueue.main.async {
         if diagnostic {
             diagnosticFrames += 1
             diagnosticPeak = max(diagnosticPeak,n)
-        } else { GestureModel.shared.frame(timestamp,points,pressed) }
+        } else { GestureModel.shared.frame(timestamp,points,pressed,deviceIndex) }
     }
 }
 
@@ -51,67 +51,103 @@ final class GestureModel: ObservableObject {
     static let shared = GestureModel()
     @Published var enabled = false
     @Published var devices: [String] = []
+    @Published var deviceIndices: [Int32] = []
+    @Published var selectedDevice: Int32 = -1
+    var isTrackpad: Bool { tap_device_is_trackpad(selectedDevice) }
+    var gestureIndices: [Int] { isTrackpad ? Array(3..<9) : Array(0..<3) }
+    func gestureTitle(_ index: Int) -> String {
+        index<3 ? ["单指轻触","双指轻触","三指轻触"][index] : TrackpadRecognizer.Gesture(rawValue:index-3)!.title
+    }
+    func selectDevice(_ index: Int32) {
+        stop();selectedDevice=index;recent="尚未识别手势";actionFeedback=""
+    }
     @Published var status = "轻触识别已暂停"
     @Published var activeFingers = 0
     @Published var frames = 0
     @Published var recent = "尚未识别轻触"
     @Published var trusted = AXIsProcessTrusted()
-    @Published var appPaths: [String] = ["","",""] { didSet { UserDefaults.standard.set(appPaths,forKey:"appPaths") } }
+    @Published var appPaths: [String] = Array(repeating:"",count:9) { didSet {
+        UserDefaults.standard.set(Array(appPaths.prefix(3)),forKey:"appPaths")
+        UserDefaults.standard.set(Array(appPaths.suffix(6)),forKey:"trackpadAppPaths")
+    } }
     @Published var actionFeedback = ""
-    @Published var actions: [Action] = [.left,.right,.middle] { didSet { save() } }
+    @Published var actions: [Action] = [.left,.right,.middle] + Array(repeating:.none,count:6) { didSet { save() } }
     @Published var duration = 0.25 { didSet { UserDefaults.standard.set(duration,forKey:"duration") } }
     @Published var movement = 0.035 { didSet { UserDefaults.standard.set(movement,forKey:"movement") } }
     @Published var previewOnly = true
     private var recognizer = TapRecognizer()
+    private var trackpadRecognizer = TrackpadRecognizer()
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var permissionTimer: Timer?
     private init() {
         let defaults = UserDefaults.standard
-        if let saved = defaults.stringArray(forKey:"actions"), saved.count==3 { actions = saved.map { Action(rawValue:$0) ?? .none } }
+        // Read every namespace before assigning observed properties, preserving both profiles.
+        let mouseActions=defaults.stringArray(forKey:"actions")
+        let padActions=defaults.stringArray(forKey:"trackpadActions")
+        let mousePaths=defaults.stringArray(forKey:"appPaths")
+        let padPaths=defaults.stringArray(forKey:"trackpadAppPaths")
+        let loadedMouse=mouseActions?.count==3 ? mouseActions!.map {Action(rawValue:$0) ?? .none} : [.left,.right,.middle]
+        let loadedPad=padActions?.count==6 ? padActions!.map {Action(rawValue:$0) ?? .none} : Array(repeating:Action.none,count:6)
+        actions=loadedMouse+loadedPad
+        appPaths=(mousePaths?.count==3 ? mousePaths! : Array(repeating:"",count:3)) + (padPaths?.count==6 ? padPaths! : Array(repeating:"",count:6))
         if defaults.object(forKey:"duration") != nil { duration = max(0.12,min(0.45,defaults.double(forKey:"duration"))) }
         if defaults.object(forKey:"movement") != nil { movement = max(0.015,min(0.08,defaults.double(forKey:"movement"))) }
-        if let paths = defaults.stringArray(forKey:"appPaths"), paths.count == 3 { appPaths = paths }
         rescan()
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown,.rightMouseDown,.otherMouseDown]) { [weak self] event in self?.physicalClick(event) }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown,.rightMouseDown,.otherMouseDown]) { [weak self] event in self?.physicalClick(event); return event }
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 2,repeats:true) { [weak self] _ in self?.trusted = AXIsProcessTrusted() }
     }
-    private func save() { UserDefaults.standard.set(actions.map(\.rawValue),forKey:"actions") }
+    private func save() {
+        UserDefaults.standard.set(actions.prefix(3).map(\.rawValue),forKey:"actions")
+        UserDefaults.standard.set(actions.suffix(6).map(\.rawValue),forKey:"trackpadActions")
+    }
     private func physicalClick(_ event: NSEvent) {
-        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) != eventMarker { recognizer.cancel() }
+        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) != eventMarker { recognizer.cancel();trackpadRecognizer.cancel() }
     }
     func rescan() {
         let resume = enabled
         enabled = false
-        recognizer.reset();activeFingers=0
+        recognizer.reset();trackpadRecognizer.reset();activeFingers=0
         let count = tap_scan()
-        devices = (0..<count).filter { tap_device_is_mouse($0) }.map { String(cString:tap_device_name($0)) }
-        status = devices.isEmpty ? "未检测到 Magic Mouse，请连接蓝牙后刷新" : "已连接，轻触识别已暂停"
+        let previousName=deviceIndices.firstIndex(of:selectedDevice).map { devices[$0] }
+        deviceIndices=Array(0..<count).filter { tap_device_is_mouse($0) || tap_device_is_trackpad($0) }
+        devices=deviceIndices.map { String(cString:tap_device_name($0)) }
+        if let previousName, let offset=devices.firstIndex(of:previousName) { selectedDevice=deviceIndices[offset] }
+        else { selectedDevice=deviceIndices.first(where:{tap_device_is_mouse($0)}) ?? deviceIndices.first ?? -1 }
+        status = devices.isEmpty ? "未检测到鼠标或触控板，请连接后刷新" : "已连接，手势识别已暂停"
         let error = String(cString:tap_error())
         if !error.isEmpty { status = error }
         if resume { start() }
     }
     func start() {
-        recognizer.reset(); frames=0
-        guard !devices.isEmpty else { status="请先连接 Magic Mouse，再刷新设备";return }
-        let started = tap_start(magicTapFrame)
+        recognizer.reset();trackpadRecognizer.reset(); frames=0
+        guard !devices.isEmpty else { status="请先连接鼠标或触控板，再刷新设备";return }
+        let started = tap_start(magicTapFrame,selectedDevice)
         enabled = started>0
         status = enabled ? "监听中 · 请先抬起所有手指，再轻触" : "未能启动触控监听，请刷新设备"
     }
     func stop() {
-        enabled=false;tap_stop();recognizer.reset();activeFingers=0;status="轻触识别已暂停"
+        enabled=false;tap_stop();recognizer.reset();trackpadRecognizer.reset();activeFingers=0;status="轻触识别已暂停"
     }
-    func frame(_ time: Double,_ points: [(Double,Double)],_ physical: Bool) {
-        guard enabled else { return }
+    func frame(_ time: Double,_ points: [(Double,Double)],_ physical: Bool,_ deviceIndex: Int32) {
+        guard enabled, deviceIndex==selectedDevice else { return }
         frames += 1;activeFingers=points.count
         recognizer.maximumDuration=duration;recognizer.movementLimit=movement
-        if let fingers=recognizer.feed(time:time,points:points,physicalButton:physical) {
-            let action=actions[fingers-1]
-            recent="\(fingers) 指轻触 → \(action.title)\(previewOnly ? "（预览）" : "")"
+        let gestureIndex: Int?
+        if isTrackpad {
+            trackpadRecognizer.maximumDuration=duration
+            trackpadRecognizer.movementLimit=movement
+            gestureIndex=trackpadRecognizer.feed(time:time,points:points,physicalButton:physical).map { $0.rawValue+3 }
+        } else {
+            gestureIndex=recognizer.feed(time:time,points:points,physicalButton:physical).map { $0-1 }
+        }
+        if let index=gestureIndex {
+            let action=actions[index]
+            recent="\(gestureTitle(index)) → \(action.title)\(previewOnly ? "（预览）" : "")"
             guard !previewOnly, action != .none else { return }
             guard !action.needsAccessibility || AXIsProcessTrusted() else { actionFeedback="需要辅助功能权限才能执行此动作";return }
-            perform(action,gesture:fingers-1)
+            perform(action,gesture:index)
         }
     }
     func requestPermission() {
@@ -132,11 +168,13 @@ final class GestureModel: ObservableObject {
         panel.allowsMultipleSelection=false
         panel.canChooseDirectories=false
         panel.directoryURL=URL(fileURLWithPath:"/Applications",isDirectory:true)
+        let selectionIsTrackpad=isTrackpad
         panel.begin { [weak self] response in
             guard response == .OK, let url=panel.url else { return }
             guard (try? AppControl.applicationURL(path:url.path)) != nil else {
                 self?.actionFeedback="请选择有效的 macOS 应用程序";return
             }
+            guard self?.isTrackpad==selectionIsTrackpad else { return }
             self?.appPaths[gesture]=url.path
         }
     }
@@ -184,19 +222,26 @@ struct SettingsView: View {
                 Image(systemName:"computermouse.fill").font(.system(size:32)).foregroundStyle(.blue)
                 VStack(alignment:.leading,spacing:4) {
                     Text("MagicTap").font(.title.bold())
-                    Text("让妙控鼠标的轻触，成为你习惯的动作。") .foregroundStyle(.secondary)
+                    Text("为鼠标和触控板配置你的手势。") .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("实验版 0.2").font(.caption).padding(7).background(.quaternary,in:Capsule())
+                Text("实验版 0.3").font(.caption).padding(7).background(.quaternary,in:Capsule())
             }
             GroupBox {
                 VStack(alignment:.leading,spacing:10) {
                     HStack {
-                        Label(model.devices.isEmpty ? "鼠标未连接" : "Magic Mouse 已连接",systemImage:model.devices.isEmpty ? "circle" : "checkmark.circle.fill")
+                        Label(model.devices.isEmpty ? "设备未连接" : "触控设备已连接",systemImage:model.devices.isEmpty ? "circle" : "checkmark.circle.fill")
                         Spacer()
                         Button("刷新设备") { model.rescan() }
                     }
-                    ForEach(model.devices,id:\.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                    Picker("输入设备",selection:Binding(get:{model.selectedDevice},set:{model.selectDevice($0)})) {
+                        if model.deviceIndices.isEmpty { Text("无设备").tag(Int32(-1)) }
+                        ForEach(model.deviceIndices,id:\.self) { index in
+                            Text(String(cString:tap_device_name(index))).tag(index)
+                        }
+                    }
+                    Text("切换设备会暂停识别。鼠标和触控板的动作分别保存。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text(model.status).font(.callout).foregroundStyle(.secondary)
                     HStack {
                         Button(model.enabled ? "暂停识别" : "开始识别") { if model.enabled { model.stop() } else { model.start() } }
@@ -205,12 +250,12 @@ struct SettingsView: View {
                     }
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(7)
             }
-            GroupBox("轻触动作") {
+            GroupBox(model.isTrackpad ? "触控板手势" : "鼠标轻触") {
                 VStack(spacing:12) {
-                    ForEach(0..<3) { index in
+                    ForEach(model.gestureIndices,id:\.self) { index in
                         VStack(alignment:.leading,spacing:8) {
                         HStack {
-                            Text(["单指轻触","双指轻触","三指轻触"][index]).frame(width:90,alignment:.leading)
+                            Text(model.gestureTitle(index)).frame(width:90,alignment:.leading)
                             Picker("动作",selection:Binding(get:{model.actions[index]},set:{model.actions[index]=$0})) {
                                 ForEach(Action.allCases) { action in Text(action.title).tag(action) }
                             }.labelsHidden().frame(maxWidth:.infinity)
@@ -223,6 +268,10 @@ struct SettingsView: View {
                             }.font(.callout).padding(.leading,98)
                         }
                         }
+                    }
+                    if model.isTrackpad {
+                        Text("四指滑动按手指移动方向识别，每次落指只触发一次。请在系统设置 → 触控板 → 更多手势中关闭相同的系统手势，避免同时触发。三指拖移也可能与三指轻触冲突。本工具不会拦截系统手势。")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     Text("亮度、音量每次调整约 6%。亮度优先控制内置屏幕；音量控制当前输出设备。")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
@@ -258,7 +307,7 @@ struct SettingsView: View {
                     Text("当前触点：\(model.activeFingers)    已接收帧：\(model.frames)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(6)
             }
-            Text("轻触前请先抬起所有手指。支持同时落下的 1–3 指；停留、滑动和实体按压会过滤。三指效果取决于鼠标触控上报，仍需实测。")
+            Text("手势前请先抬起全部手指。鼠标支持 1–3 指轻触；触控板支持三指、四指轻触和四指四向滑动。触控板默认所有动作关闭，请先在预览模式验证。")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
         }.padding(24)
         }.frame(width:580,height:740)
@@ -294,6 +343,7 @@ struct MenuContents: View {
     static func main() {
         if CommandLine.arguments.contains("--self-test") {
             runRecognizerTests()
+            runTrackpadTests()
             precondition(boundedLevel(-0.1)==0 && boundedLevel(1.1)==1 && boundedLevel(0.5)==0.5)
             print("PASS: system level bounds")
             precondition((try? AppControl.applicationURL(path:"")) == nil)
@@ -325,9 +375,10 @@ struct MenuContents: View {
         }
         if CommandLine.arguments.contains("--probe") || CommandLine.arguments.contains("--capture") {
             let n=tap_scan(); print("Touch devices: \(n)")
-            for i in 0..<n { print("\(tap_device_is_mouse(i) ? "Magic Mouse" : "Ignored"): \(String(cString:tap_device_name(i)))") }
+            for i in 0..<n { print("\(tap_device_is_mouse(i) ? "Magic Mouse" : (tap_device_is_trackpad(i) ? "Trackpad" : "Ignored")): \(String(cString:tap_device_name(i)))") }
             if CommandLine.arguments.contains("--capture") {
-                diagnostic=true;print("Started: \(tap_start(magicTapFrame))")
+                let selected=(0..<n).first(where:{CommandLine.arguments.contains("--trackpad") ? tap_device_is_trackpad($0) : tap_device_is_mouse($0)}) ?? -1
+                diagnostic=true;print("Started: \(tap_start(magicTapFrame,selected))")
                 RunLoop.main.run(until:Date().addingTimeInterval(5));tap_stop()
                 print("Frames: \(diagnosticFrames), peak active contacts: \(diagnosticPeak)")
             }
