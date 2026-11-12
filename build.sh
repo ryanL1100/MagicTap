@@ -21,7 +21,7 @@ xcrun swiftc -O -swift-version 5 -target "$MAGICTAP_ARCH-apple-macosx$MAGICTAP_M
   Sources/TapRecognizer.swift Sources/TrackpadRecognizer.swift Sources/SystemActions.swift Sources/MagicTap.swift \
   "$MAGICTAP_BUILD_DIR/TouchBridge.o" \
   -framework SwiftUI -framework AppKit -framework ApplicationServices \
-  -framework IOKit -framework CoreFoundation -framework CoreAudio \
+  -framework IOKit -framework CoreFoundation -framework CoreAudio -framework ServiceManagement \
   -o "$MAGICTAP_APP/Contents/MacOS/MagicTap"
 cp Resources/Info.plist "$MAGICTAP_APP/Contents/Info.plist"
 plutil -lint "$MAGICTAP_APP/Contents/Info.plist"
