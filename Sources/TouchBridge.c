@@ -32,13 +32,13 @@ static char names[64][256];
 static bool mice[64];
 static bool trackpads[64];
 static int count;
-static _Atomic(uintptr_t) activeDevice;
-static _Atomic(int) activeIndex;
+static _Atomic(uintptr_t) activeDevices[64];
 static char errorText[256];
 static int onContact(Device device, Contact *contacts, int n, double timestamp, int frame) {
  (void)frame;
- if(atomic_load(&activeDevice)!=(uintptr_t)device)return 0;
- int index=atomic_load(&activeIndex);
+ int index=-1;
+ for(int i=0;i<64;i++) if(atomic_load(&activeDevices[i])==(uintptr_t)device){index=i;break;}
+ if(index<0)return 0;
  if(!handler || n<0 || n>32 || (n>0 && !contacts))return 0;
  float positions[64]; int active=0;
  for(int i=0;i<n;i++) {
@@ -62,7 +62,7 @@ static bool load(void) {
  return true;
 }
 void tap_stop(void) {
- atomic_store(&activeDevice,0);
+ for(int i=0;i<64;i++)atomic_store(&activeDevices[i],0);
  for(int i=0;i<count;i++)if(running[i]){
   Device d=(Device)CFArrayGetValueAtIndex(devices,i);
   stopDevice(d);unregisterCallback(d,onContact);running[i]=false;
@@ -94,9 +94,9 @@ bool tap_device_is_mouse(int i){return i>=0 && i<count && mice[i];}
 bool tap_device_is_trackpad(int i){return i>=0 && i<count && trackpads[i];}
 int tap_start(TapFrameHandler callback, int selected){
  handler=callback; int started=0;
- for(int i=0;i<count;i++)if(i==selected && (mice[i] || trackpads[i]) && !running[i]){
+ for(int i=0;i<count;i++)if((selected<0 || i==selected) && (mice[i] || trackpads[i]) && !running[i]){
   Device d=(Device)CFArrayGetValueAtIndex(devices,i);
-  running[i]=true;atomic_store(&activeIndex,i);atomic_store(&activeDevice,(uintptr_t)d);
+  running[i]=true;atomic_store(&activeDevices[i],(uintptr_t)d);
   registerCallback(d,onContact);startDevice(d,0);started++;
  }
  return started;

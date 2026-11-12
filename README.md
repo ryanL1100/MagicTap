@@ -2,17 +2,27 @@
 
 用于 Apple Magic Mouse、Mac 内置触控板和 Apple 妙控板的 macOS 菜单栏触控工具。SwiftUI + AppKit 界面，C 桥接原始触控，所有处理在本机完成。
 
+## 0.5 鼠标与触控板同时使用
+
+启动识别后同时监听所有已发现的 Magic Mouse 和 Trackpad。每台物理设备独立维护手势状态，鼠标沿用鼠标动作，触控板沿用触控板动作。
+
+“配置设备”菜单只决定下方显示哪种动作配置，切换不会暂停任何设备。顶部按设备显示触点数和帧计数，底部最近动作带有“鼠标 / 触控板”来源。多个同类设备使用同一套同类动作配置。
+
+开始 / 暂停、预览开关仍为全局设置。任一设备发生实体点击时，会取消所有正在进行的轻触，减少实体点击后的重复动作。运行中连接新设备或断线重连后请点击“刷新设备”，重新发现设备并恢复监听。
+
+已通过交错鼠标轻触、触控板轻触、四指滑动、独立防抖和取消状态的自动测试。两个设备的真实手势同时执行仍需真机验证，算法测试不代替真机验收。
+
 ## 0.4 自动启动与状态恢复
 
 设置窗口新增“启动设置 → 登录 Mac 后自动启动”，使用 macOS 的 `SMAppService.mainApp` 注册登录项。开启后，在下次登录当前 Mac 用户账户时启动；可在应用里关闭，也可通过“查看系统登录项”前往系统设置管理。如果系统要求批准，以系统设置中的状态为准。
 
-应用重开时恢复上次选中的设备、识别开关和预览状态。点击“暂停识别”会保存暂停状态；正常退出或重启 Mac 保留当前识别开关。首次使用保持暂停和预览开启。如果上次选择的设备尚未连接，恢复识别时每 5 秒重新查找，直到该设备出现；不会自动切换到另一台设备执行动作。
+应用重开时恢复上次选中的设备、识别开关和预览状态。点击“暂停识别”会保存暂停状态；正常退出或重启 Mac 保留当前识别开关。首次使用保持暂停和预览开启。恢复识别时如没有可用设备，每 5 秒重新查找；找到设备后同时监听所有已发现的支持设备。
 
 登录项绑定当前应用，请将长期使用的应用保留在固定路径，避免删除、移动或重新构建后未经验证就继续使用登录项。此功能不绕过辅助功能权限；重建签名后仍可能需要重新授权。更新前的可用 0.3 备份不会自动运行。
 
 ## 0.3 触控板手势
 
-“输入设备”菜单可选择鼠标或触控板。一次只监听选定的一台设备，切换设备会暂停识别，需要再次点击“开始识别”。鼠标动作与触控板动作分别保存；鼠标已有动作、App 绑定保留。
+“配置设备”菜单可选择查看鼠标或触控板的动作配置；所有已发现的支持设备同时监听。鼠标动作与触控板动作分别保存；鼠标已有动作、App 绑定保留。
 
 触控板支持以下六种手势，均可绑定音量、亮度、打开 App、点击等现有动作：
 
@@ -76,7 +86,7 @@ open dist/MagicTap.app
 ./package.sh
 ```
 
-该命令会先构建和自测，再生成 `dist/MagicTap-0.4.0-arm64.zip`（文件名中的架构随当前 Mac 改变）。`dist/` 和应用二进制不会提交到 Git。
+该命令会先构建和自测，再生成 `dist/MagicTap-0.5.0-arm64.zip`（文件名中的架构随当前 Mac 改变）。`dist/` 和应用二进制不会提交到 Git。
 
 默认使用 `codesign --sign -` 临时签名，没有 Developer ID 签名或 Apple 公证。如有自己的签名证书，可设置：
 
@@ -88,7 +98,7 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 
 ## 使用与权限
 
-1. 通过蓝牙连接 Magic Mouse，打开应用，点击“刷新设备”。通过“输入设备”选择鼠标或触控板；名称包含 `Magic Mouse` 或 `Trackpad` 的设备会出现在列表。
+1. 通过蓝牙连接 Magic Mouse，打开应用，点击“刷新设备”。通过“配置设备”查看鼠标或触控板配置；名称包含 `Magic Mouse` 或 `Trackpad` 的设备会出现在列表。
 2. 点击“开始识别”。首次启动默认暂停、默认勾选“仅预览，不执行动作”；后续启动恢复上次状态。
 3. 先把所有手指抬离鼠标，再落下并抬起手指。默认有效时长 35–250 ms，移动容差为触控范围的 3.5%。
 4. 在窗口底部确认识别结果。要执行点击或快捷键，点击“打开权限设置”，在“隐私与安全性 → 辅助功能”中为**实际运行的那一份应用**授权。
@@ -119,8 +129,9 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 | --- | --- |
 | `Sources/MagicTap.swift` | SwiftUI 设置界面、菜单栏、配置、权限检查和动作分发 |
 | `Sources/TapRecognizer.swift` | 鼠标轻触识别状态机与自测 |
+| `Sources/DeviceRecognizers.swift` | 每台设备的独立识别状态及交错输入测试 |
 | `Sources/TrackpadRecognizer.swift` | 触控板三指 / 四指轻触、四向滑动与自测 |
-| `Sources/TouchBridge.h` / `.c` | 加载 MultitouchSupport，筛选鼠标 / 触控板并转发选定设备的触控帧 |
+| `Sources/TouchBridge.h` / `.c` | 加载 MultitouchSupport，筛选鼠标 / 触控板并转发各设备的触控帧 |
 | `Sources/SystemActions.swift` | CoreAudio 音量、DisplayServices 亮度、App 启动 |
 | `Resources/Info.plist` | 应用标识、版本、最低系统版本和菜单栏配置 |
 | `build.sh` | 编译、生成 `.app`、签名和自测 |
@@ -134,12 +145,13 @@ MAGICTAP_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./package.
 ./dist/MagicTap.app/Contents/MacOS/MagicTap --system-probe
 ./dist/MagicTap.app/Contents/MacOS/MagicTap --capture
 ./dist/MagicTap.app/Contents/MacOS/MagicTap --capture --trackpad
+./dist/MagicTap.app/Contents/MacOS/MagicTap --capture --all-devices
 ```
 
 - `--self-test`：识别器、音量/亮度边界、缺失 App 校验和动作权限分类测试，不模拟真实鼠标操作。
 - `--probe`：列出触控设备及筛选结果。
 - `--system-probe`：只读检查音频设备及显示器亮度接口。
-- `--capture`：监听五秒鼠标触控并输出统计；添加 `--trackpad` 则选择触控板，不执行动作。请避免和正在监听的另一个副本同时使用。
+- `--capture`：监听五秒鼠标触控并输出统计；添加 `--trackpad` 则选择触控板，`--all-devices` 则同时监听并分别输出帧数，不执行动作。请避免和正在监听的另一个副本同时使用。
 
 另有 `--system-check`（将音量、亮度原值写回以检查可写性）和 `--open-app-check /System/Applications/Calculator.app`（实际打开指定应用）供开发诊断使用。
 

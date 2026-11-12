@@ -9,6 +9,7 @@ private let eventMarker: Int64 = 0x4D544150
 private var diagnostic = false
 private var diagnosticFrames = 0
 private var diagnosticPeak = 0
+private var diagnosticDeviceFrames: [Int32:Int] = [:]
 
 @_cdecl("magic_tap_frame")
 func magicTapFrame(_ timestamp: Double, _ count: Int32, _ coordinates: UnsafePointer<Float>?, _ deviceIndex: Int32) {
@@ -19,6 +20,7 @@ func magicTapFrame(_ timestamp: Double, _ count: Int32, _ coordinates: UnsafePoi
     DispatchQueue.main.async {
         if diagnostic {
             diagnosticFrames += 1
+            diagnosticDeviceFrames[deviceIndex,default:0] += 1
             diagnosticPeak = max(diagnosticPeak,n)
         } else { GestureModel.shared.frame(timestamp,points,pressed,deviceIndex) }
     }
@@ -84,7 +86,7 @@ final class GestureModel: ObservableObject {
         index<3 ? ["单指轻触","双指轻触","三指轻触"][index] : TrackpadRecognizer.Gesture(rawValue:index-3)!.title
     }
     func selectDevice(_ index: Int32) {
-        stop();selectedDevice=index;
+        selectedDevice=index;
         UserDefaults.standard.set(String(cString:tap_device_name(index)),forKey:"selectedDeviceName")
         recent="尚未识别手势";actionFeedback=""
     }
@@ -104,8 +106,9 @@ final class GestureModel: ObservableObject {
     @Published var previewOnly = true { didSet { UserDefaults.standard.set(previewOnly,forKey:"previewOnly") } }
     private var wantsRecognition = false
     private var reconnectTimer: Timer?
-    private var recognizer = TapRecognizer()
-    private var trackpadRecognizer = TrackpadRecognizer()
+    private var recognizers = DeviceRecognizers()
+    @Published var deviceFrames: [Int32:Int] = [:]
+    @Published var deviceContacts: [Int32:Int] = [:]
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var permissionTimer: Timer?
@@ -139,12 +142,12 @@ final class GestureModel: ObservableObject {
         UserDefaults.standard.set(actions.suffix(6).map(\.rawValue),forKey:"trackpadActions")
     }
     private func physicalClick(_ event: NSEvent) {
-        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) != eventMarker { recognizer.cancel();trackpadRecognizer.cancel() }
+        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) != eventMarker { recognizers.cancel() }
     }
     func rescan() {
         let resume = wantsRecognition
         enabled = false
-        recognizer.reset();trackpadRecognizer.reset();activeFingers=0
+        recognizers.reset();activeFingers=0
         let count = tap_scan()
         let previousName=deviceIndices.firstIndex(of:selectedDevice).map { devices[$0] } ?? UserDefaults.standard.string(forKey:"selectedDeviceName")
         deviceIndices=Array(0..<count).filter { tap_device_is_mouse($0) || tap_device_is_trackpad($0) }
@@ -162,33 +165,30 @@ final class GestureModel: ObservableObject {
     func start() {
         wantsRecognition=true
         UserDefaults.standard.set(true,forKey:"recognitionEnabled")
-        recognizer.reset();trackpadRecognizer.reset(); frames=0
-        guard selectedDevice>=0 else { status="等待上次使用的设备连接（每 5 秒重试）";return }
-        UserDefaults.standard.set(String(cString:tap_device_name(selectedDevice)),forKey:"selectedDeviceName")
-        let started = tap_start(magicTapFrame,selectedDevice)
+        recognizers.reset(); frames=0
+        deviceFrames=[:];deviceContacts=[:]
+        guard !deviceIndices.isEmpty else { status="等待鼠标或触控板连接（每 5 秒重试）";return }
+        let started = tap_start(magicTapFrame,-1)
         enabled = started>0
-        status = enabled ? "监听中 · 请先抬起所有手指，再轻触" : "未能启动触控监听，请刷新设备"
+        status = enabled ? "正在同时监听 \(started) 台设备 · 请先抬起全部手指" : "未能启动触控监听，请刷新设备"
     }
     func stop() {
         wantsRecognition=false
         UserDefaults.standard.set(false,forKey:"recognitionEnabled")
-        enabled=false;tap_stop();recognizer.reset();trackpadRecognizer.reset();activeFingers=0;status="轻触识别已暂停"
+        enabled=false;tap_stop();recognizers.reset();activeFingers=0;status="轻触识别已暂停"
     }
     func frame(_ time: Double,_ points: [(Double,Double)],_ physical: Bool,_ deviceIndex: Int32) {
-        guard enabled, deviceIndex==selectedDevice else { return }
-        frames += 1;activeFingers=points.count
-        recognizer.maximumDuration=duration;recognizer.movementLimit=movement
-        let gestureIndex: Int?
-        if isTrackpad {
-            trackpadRecognizer.maximumDuration=duration
-            trackpadRecognizer.movementLimit=movement
-            gestureIndex=trackpadRecognizer.feed(time:time,points:points,physicalButton:physical).map { $0.rawValue+3 }
-        } else {
-            gestureIndex=recognizer.feed(time:time,points:points,physicalButton:physical).map { $0-1 }
-        }
+        guard enabled, deviceIndices.contains(deviceIndex) else { return }
+        frames += 1
+        deviceFrames[deviceIndex,default:0] += 1
+        deviceContacts[deviceIndex]=points.count
+        activeFingers=deviceContacts.values.reduce(0,+)
+        let pad=tap_device_is_trackpad(deviceIndex)
+        let gestureIndex=recognizers.feed(device:deviceIndex,isTrackpad:pad,time:time,points:points,
+                                         physicalButton:physical,duration:duration,movement:movement)
         if let index=gestureIndex {
             let action=actions[index]
-            recent="\(gestureTitle(index)) → \(action.title)\(previewOnly ? "（预览）" : "")"
+            recent="\(pad ? "触控板" : "鼠标") · \(gestureTitle(index)) → \(action.title)\(previewOnly ? "（预览）" : "")"
             guard !previewOnly, action != .none else { return }
             guard !action.needsAccessibility || AXIsProcessTrusted() else { actionFeedback="需要辅助功能权限才能执行此动作";return }
             perform(action,gesture:index)
@@ -269,7 +269,7 @@ struct SettingsView: View {
                     Text("为鼠标和触控板配置你的手势。") .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("实验版 0.4").font(.caption).padding(7).background(.quaternary,in:Capsule())
+                Text("实验版 0.5").font(.caption).padding(7).background(.quaternary,in:Capsule())
             }
             GroupBox {
                 VStack(alignment:.leading,spacing:10) {
@@ -278,15 +278,19 @@ struct SettingsView: View {
                         Spacer()
                         Button("刷新设备") { model.rescan() }
                     }
-                    Picker("输入设备",selection:Binding(get:{model.selectedDevice},set:{model.selectDevice($0)})) {
+                    Picker("配置设备",selection:Binding(get:{model.selectedDevice},set:{model.selectDevice($0)})) {
                         if model.selectedDevice<0 { Text("等待设备连接 / 请选择设备").tag(Int32(-1)) }
                         ForEach(model.deviceIndices,id:\.self) { index in
                             Text(String(cString:tap_device_name(index))).tag(index)
                         }
                     }
-                    Text("切换设备会暂停识别。鼠标和触控板的动作分别保存。")
+                    Text("鼠标和触控板同时监听。此菜单只切换下方配置，不会暂停其他设备。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(model.status).font(.callout).foregroundStyle(.secondary)
+                    ForEach(model.deviceIndices,id:\.self) { index in
+                        Text("\(String(cString:tap_device_name(index))) · 触点 \(model.deviceContacts[index,default:0]) · 帧 \(model.deviceFrames[index,default:0])")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button(model.enabled ? "暂停识别" : "开始识别") { if model.enabled { model.stop() } else { model.start() } }
                             .buttonStyle(.borderedProminent).disabled(model.devices.isEmpty)
@@ -298,7 +302,7 @@ struct SettingsView: View {
                 VStack(alignment:.leading,spacing:8) {
                     Toggle("登录 Mac 后自动启动",isOn:Binding(get:{model.loginEnabled},set:{model.setLoginEnabled($0)}))
                     Text(model.loginMessage).font(.caption).foregroundStyle(.secondary)
-                    Text("重开应用时恢复上次的输入设备、识别开关及预览状态。设备未连接时每 5 秒重试。辅助功能授权仍由系统管理。")
+                    Text("重开应用时恢复上次的配置设备、识别开关及预览状态。设备未连接时每 5 秒重试。辅助功能授权仍由系统管理。")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     Button("查看系统登录项") { SMAppService.openSystemSettingsLoginItems() }
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(7)
@@ -397,6 +401,7 @@ struct MenuContents: View {
         if CommandLine.arguments.contains("--self-test") {
             runRecognizerTests()
             runTrackpadTests()
+            runDeviceTests()
             precondition(boundedLevel(-0.1)==0 && boundedLevel(1.1)==1 && boundedLevel(0.5)==0.5)
             print("PASS: system level bounds")
             precondition((try? AppControl.applicationURL(path:"")) == nil)
@@ -430,10 +435,11 @@ struct MenuContents: View {
             let n=tap_scan(); print("Touch devices: \(n)")
             for i in 0..<n { print("\(tap_device_is_mouse(i) ? "Magic Mouse" : (tap_device_is_trackpad(i) ? "Trackpad" : "Ignored")): \(String(cString:tap_device_name(i)))") }
             if CommandLine.arguments.contains("--capture") {
-                let selected=(0..<n).first(where:{CommandLine.arguments.contains("--trackpad") ? tap_device_is_trackpad($0) : tap_device_is_mouse($0)}) ?? -1
+                let selected=CommandLine.arguments.contains("--all-devices") ? Int32(-1) : (0..<n).first(where:{CommandLine.arguments.contains("--trackpad") ? tap_device_is_trackpad($0) : tap_device_is_mouse($0)}) ?? -1
                 diagnostic=true;print("Started: \(tap_start(magicTapFrame,selected))")
                 RunLoop.main.run(until:Date().addingTimeInterval(5));tap_stop()
                 print("Frames: \(diagnosticFrames), peak active contacts: \(diagnosticPeak)")
+                for index in diagnosticDeviceFrames.keys.sorted() { print("Device \(index): \(diagnosticDeviceFrames[index]!) frames") }
             }
             return
         }
